@@ -10,6 +10,7 @@ Forked from [gen2brain/go-mpv](https://github.com/gen2brain/go-mpv), focused on 
 
 - Full CGo bindings for libmpv
 - `mpv_node` API support for complex data structures
+- Video embedding via `mpv_render_context` (OpenGL/Software)
 - Async command/property operations
 - Event system for playback state changes
 
@@ -144,6 +145,30 @@ for {
     }
 }
 ```
+
+### Video Rendering (Embedded Video)
+
+You can embed video into your own application's GUI (e.g. using SDL2, GLFW, Fyne) via the Render API:
+
+```go
+m := mpv.Create()
+m.SetOptionString("vo", "libmpv") // Disable default window
+
+m.Initialize()
+
+// Create OpenGL render context
+rc, _ := m.NewRenderContext(sdl.GLGetProcAddress, false)
+defer rc.Free()
+
+// Inside your GUI render loop:
+<-rc.WaitUpdate()
+if rc.Update()&mpv.RENDER_UPDATE_FRAME != 0 {
+    rc.Render(mpv.OpenGLFBO{FBO: 0, W: width, H: height}, true)
+    // Swap OpenGL buffers
+    rc.ReportSwap()
+}
+```
+See the complete [SDL2 + OpenGL example](examples/render_sdl/main.go).
 
 ## API Reference
 
