@@ -1,3 +1,3 @@
-module github.com/supersonic-app/go-mpv
+module github.com/xmengnet/go-mpv
 
 go 1.19

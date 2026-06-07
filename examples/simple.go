@@ -5,7 +5,7 @@ import (
 	"log"
 	"os"
 
-	"github.com/supersonic-app/go-mpv"
+	"github.com/xmengnet/go-mpv"
 )
 
 func main() {
