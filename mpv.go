@@ -101,7 +101,9 @@ func (m *Mpv) Command(command []string) error {
 
 // CommandString runs the given command string, this string is parsed internally by mpv.
 func (m *Mpv) CommandString(command string) error {
-	return newError(C.mpv_command_string(m.handle, C.CString(command)))
+	cCommand := C.CString(command)
+	defer C.free(unsafe.Pointer(cCommand))
+	return newError(C.mpv_command_string(m.handle, cCommand))
 }
 
 // CommandNode runs the given command node.
@@ -111,7 +113,9 @@ func (m *Mpv) CommandNode(args Node, result *Node) error {
 
 // LoadConfigFile loads the given config file.
 func (m *Mpv) LoadConfigFile(fn string) error {
-	return newError(C.mpv_load_config_file(m.handle, C.CString(fn)))
+	cFn := C.CString(fn)
+	defer C.free(unsafe.Pointer(cFn))
+	return newError(C.mpv_load_config_file(m.handle, cFn))
 }
 
 // SetProperty sets the client property according to the given format.
@@ -214,12 +218,11 @@ func (m *Mpv) GetPropertyOsdString(name string) string {
 	cName := C.CString(name)
 	defer C.free(unsafe.Pointer(cName))
 	str := C.mpv_get_property_osd_string(m.handle, cName)
-	defer C.mpv_free(unsafe.Pointer(str))
-	if str != nil {
-		return C.GoString(str)
-	} else {
+	if str == nil {
 		return ""
 	}
+	defer C.mpv_free(unsafe.Pointer(str))
+	return C.GoString(str)
 }
 
 // ObserveProperty .
@@ -310,7 +313,7 @@ func convertData(format Format, data interface{}) (unsafe.Pointer, func()) {
 		return nil, nil
 	case FORMAT_STRING, FORMAT_OSD_STRING:
 		str := C.CString(data.(string))
-		return unsafe.Pointer(str), func() { C.free(unsafe.Pointer(str)) }
+		return unsafe.Pointer(&str), func() { C.free(unsafe.Pointer(str)) }
 	case FORMAT_FLAG:
 		var val C.int
 		if data.(bool) {

@@ -150,6 +150,7 @@ type RenderContext struct {
 	ctx      *C.mpv_render_context
 	updateCh chan struct{}
 	cbID     uintptr
+	glID     uintptr
 }
 
 var renderCtxRegistry sync.Map
@@ -235,6 +236,7 @@ func (m *Mpv) NewRenderContext(getProcAddress func(name string) unsafe.Pointer, 
 
 	id := registerGLProcAddr(getProcAddress)
 	rc.cbID = registerRenderContext(rc)
+	rc.glID = id
 
 	var ctx *C.mpv_render_context
 	err := C.create_render_context_gl(
@@ -363,6 +365,10 @@ func (rc *RenderContext) WaitUpdate() <-chan struct{} {
 // If video is still playing, it will be forcefully disabled.
 // After this call, the RenderContext must not be used anymore.
 func (rc *RenderContext) Free() {
+	if rc.glID != 0 {
+		unregisterGLProcAddr(rc.glID)
+		rc.glID = 0
+	}
 	if rc.cbID != 0 {
 		unregisterRenderContext(rc.cbID)
 		rc.cbID = 0

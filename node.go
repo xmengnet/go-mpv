@@ -67,10 +67,13 @@ mpv_node_list* makeNodeList(int size) {
     }
     list->values = calloc(sizeof(mpv_node), size);
     if (list->values == NULL) {
+        free(list);
         return NULL;
     }
     list->keys = calloc(sizeof(char*), size);
     if (list->keys == NULL) {
+        free(list->values);
+        free(list);
         return NULL;
     }
     return list;
@@ -149,7 +152,11 @@ func (n *Node) CNode() *C.mpv_node {
 		d := n.Data.([]byte)
 		ba := &C.mpv_byte_array{}
 		ba.size = C.size_t(len(d))
-		ba.data = unsafe.Pointer(&d)
+		if len(d) > 0 {
+			ba.data = unsafe.Pointer(&d[0])
+		} else {
+			ba.data = nil
+		}
 		C.SetNodeByteArray(result, ba)
 	default:
 		return nil
