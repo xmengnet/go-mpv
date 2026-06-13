@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"image"
+	"image/color"
 	"log"
 	"os"
 	"sync"
@@ -62,13 +63,13 @@ func (v *VideoWidget) InitPlayer() error {
 	v.m.SetOption("cache-secs", mpv.FORMAT_DOUBLE, 30.0)
 
 	if err := v.m.Initialize(); err != nil {
-		return fmt.Errorf("初始化失败: %w", err)
+		return fmt.Errorf("initialization failed: %w", err)
 	}
 
 	// 初始化软渲染上下文
 	rc, err := v.m.NewSoftwareRenderContext()
 	if err != nil {
-		return fmt.Errorf("初始化软渲染器失败: %w", err)
+		return fmt.Errorf("failed to create software render context: %w", err)
 	}
 	v.rc = rc
 
@@ -148,7 +149,7 @@ func (v *VideoWidget) renderLoop() {
 // Play 播放文件或URL
 func (v *VideoWidget) Play(source string) error {
 	if v.m == nil {
-		return fmt.Errorf("播放器未初始化")
+		return fmt.Errorf("player not initialized")
 	}
 	return v.m.Command([]string{"loadfile", source})
 }
@@ -156,7 +157,7 @@ func (v *VideoWidget) Play(source string) error {
 // PlayURL 播放URL流
 func (v *VideoWidget) PlayURL(url string, headers map[string]string) error {
 	if v.m == nil {
-		return fmt.Errorf("播放器未初始化")
+		return fmt.Errorf("player not initialized")
 	}
 
 	if len(headers) > 0 {
@@ -299,7 +300,7 @@ func NewPlayerUI(w fyne.Window) *PlayerUI {
 	}
 
 	if err := ui.video.InitPlayer(); err != nil {
-		log.Fatal("初始化播放器失败:", err)
+		log.Fatal("failed to initialize player:", err)
 	}
 
 	ui.setupUI()
@@ -309,7 +310,7 @@ func NewPlayerUI(w fyne.Window) *PlayerUI {
 // setupUI 初始化UI
 func (ui *PlayerUI) setupUI() {
 	// 标题
-	ui.titleLbl = widget.NewLabel("等待播放...")
+	ui.titleLbl = widget.NewLabel("Waiting...")
 	ui.titleLbl.Wrapping = fyne.TextTruncate
 	ui.titleLbl.TextStyle = fyne.TextStyle{Bold: true}
 
@@ -341,7 +342,7 @@ func (ui *PlayerUI) setupUI() {
 		ui.video.Stop()
 		ui.playBtn.Disable()
 		ui.playBtn.SetIcon(theme.MediaPauseIcon())
-		ui.titleLbl.SetText("等待播放...")
+		ui.titleLbl.SetText("Waiting...")
 		ui.posLbl.SetText("00:00")
 		ui.durLbl.SetText("00:00")
 		ui.progress.SetValue(0)
@@ -356,7 +357,7 @@ func (ui *PlayerUI) setupUI() {
 	}
 
 	// 文件选择按钮
-	fileBtn := widget.NewButtonWithIcon("打开文件", theme.FolderOpenIcon(), func() {
+	fileBtn := widget.NewButtonWithIcon("Open File", theme.FolderOpenIcon(), func() {
 		fd := dialog.NewFileOpen(func(reader fyne.URIReadCloser, err error) {
 			if err != nil || reader == nil {
 				return
@@ -374,19 +375,19 @@ func (ui *PlayerUI) setupUI() {
 	})
 
 	// URL输入按钮
-	urlBtn := widget.NewButtonWithIcon("打开链接", theme.ComputerIcon(), func() {
+	urlBtn := widget.NewButtonWithIcon("Open URL", theme.ComputerIcon(), func() {
 		urlEntry := widget.NewEntry()
 		urlEntry.SetPlaceHolder("http://example.com/video.mp4")
 
 		headerEntry := widget.NewEntry()
-		headerEntry.SetPlaceHolder("可选: X-Emby-Token: your_token")
+		headerEntry.SetPlaceHolder("Optional: X-Emby-Token: your_token")
 
 		items := []*widget.FormItem{
-			widget.NewFormItem("视频地址", urlEntry),
-			widget.NewFormItem("认证头", headerEntry),
+			widget.NewFormItem("Video URL", urlEntry),
+			widget.NewFormItem("Headers", headerEntry),
 		}
 
-		dialog.ShowForm("打开网络视频", "播放", "取消", items, func(ok bool) {
+		dialog.ShowForm("Open Stream", "Play", "Cancel", items, func(ok bool) {
 			if !ok || urlEntry.Text == "" {
 				return
 			}
@@ -437,6 +438,10 @@ func (ui *PlayerUI) setupUI() {
 		urlBtn,
 		layout.NewSpacer(),
 	)
+	
+	// 对标题进行居中和样式增强
+	titleContainer := container.NewCenter(ui.titleLbl)
+	topPanel := container.NewVBox(topBar, titleContainer)
 
 	// 视频区域
 	videoArea := ui.video
@@ -445,8 +450,8 @@ func (ui *PlayerUI) setupUI() {
 	// 进度条行
 	progressRow := container.NewBorder(
 		nil, nil,
-		ui.posLbl,
-		ui.durLbl,
+		container.NewPadded(ui.posLbl),
+		container.NewPadded(ui.durLbl),
 		ui.progress,
 	)
 
@@ -456,22 +461,28 @@ func (ui *PlayerUI) setupUI() {
 		ui.playBtn,
 		ui.stopBtn,
 		layout.NewSpacer(),
-		volIcon,
+		container.NewCenter(volIcon),
 		ui.volSlider,
-		layout.NewSpacer(),
 	)
 
 	bottomBar := container.NewVBox(
 		progressRow,
 		controlRow,
 	)
+	
+	// 给控制栏增加带半透明背景的垫层
+	paddedBottom := container.NewPadded(bottomBar)
+	bg := canvas.NewRectangle(color.NRGBA{R: 24, G: 24, B: 24, A: 220})
+	bottomPanel := container.NewStack(bg, paddedBottom)
 
-	// 主布局
-	content := container.NewBorder(
-		container.NewVBox(topBar, ui.titleLbl),
-		bottomBar,
-		nil, nil,
+	// 主布局：使用 Stack 让视频沉浸式铺满底层，控制栏悬浮在上层
+	content := container.NewStack(
 		videoArea,
+		container.NewBorder(
+			container.NewPadded(topPanel),
+			bottomPanel,
+			nil, nil,
+		),
 	)
 
 	ui.window.SetContent(content)
@@ -511,7 +522,8 @@ func splitHeader(header string) []string {
 
 func main() {
 	a := app.New()
-	w := a.NewWindow("视频播放器")
+	a.Settings().SetTheme(theme.DarkTheme())
+	w := a.NewWindow("Go-MPV Player")
 	w.Resize(fyne.NewSize(960, 600))
 
 	ui := NewPlayerUI(w)
@@ -520,7 +532,7 @@ func main() {
 	if len(os.Args) > 1 {
 		source := os.Args[1]
 		if err := ui.video.Play(source); err != nil {
-			log.Printf("播放失败: %v", err)
+			log.Printf("Playback failed: %v", err)
 		} else {
 			ui.playBtn.Enable()
 		}
