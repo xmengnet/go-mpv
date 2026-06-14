@@ -1,19 +1,11 @@
 package main
 
-/*
-#include <locale.h>
-#include <stdlib.h>
-*/
-import "C"
-
-
 import (
 	"fmt"
 	"log"
 	"os"
-	"sync"
 	"time"
-	"unsafe"
+
 
 	"github.com/diamondburned/gotk4/pkg/gdk/v4"
 	"github.com/diamondburned/gotk4/pkg/gio/v2"
@@ -27,13 +19,11 @@ const (
 	renderHeight = 480
 )
 
-// VideoWidget encapsulates the mpv instance and the GTK picture used to display frames
+// VideoWidget encapsulates the mpv instance and the GTK GLArea used to display frames
 type VideoWidget struct {
-	picture   *gtk.Picture
-	rgba      []byte
+	glArea    *gtk.GLArea
 	m         *mpv.Mpv
 	rc        *mpv.RenderContext
-	mu        sync.Mutex
 	playing   bool
 	paused    bool
 	duration  float64
@@ -45,23 +35,30 @@ type VideoWidget struct {
 // NewVideoWidget creates a new VideoWidget
 func NewVideoWidget() *VideoWidget {
 	v := &VideoWidget{
-		picture: gtk.NewPicture(),
-		rgba:    make([]byte, renderWidth*renderHeight*4),
+		glArea: gtk.NewGLArea(),
 	}
-	v.picture.SetSizeRequest(renderWidth, renderHeight)
-	// Make it expand to fill available space
-	v.picture.SetHExpand(true)
-	v.picture.SetVExpand(true)
+	v.glArea.SetSizeRequest(renderWidth, renderHeight)
+	v.glArea.SetHExpand(true)
+	v.glArea.SetVExpand(true)
+
+	// OpenGL rendering only needs color buffer for video presentation
+	v.glArea.SetHasDepthBuffer(false)
+	v.glArea.SetHasStencilBuffer(false)
+
+	v.glArea.ConnectRealize(v.onRealize)
+	v.glArea.ConnectUnrealize(v.onUnrealize)
+	// Return true in connect render to indicate we handled it
+	v.glArea.ConnectRender(func(ctx gdk.GLContexter) bool {
+		return v.onRender(ctx)
+	})
+
 	return v
 }
 
-// InitPlayer initializes mpv and its software renderer
+// InitPlayer initializes mpv
 func (v *VideoWidget) InitPlayer() error {
-	// libmpv strict requirement: LC_NUMERIC must be "C"
-	// GTK usually overrides this during its own initialization.
-	cStr := C.CString("C")
-	C.setlocale(C.LC_NUMERIC, cStr)
-	C.free(unsafe.Pointer(cStr))
+	// 强制要求 LC_NUMERIC=C，否则 libmpv 会报错
+	fixLocale()
 
 	v.m = mpv.Create()
 	if v.m == nil || v.m.MPVHandle() == nil {
@@ -77,15 +74,53 @@ func (v *VideoWidget) InitPlayer() error {
 		return fmt.Errorf("initialization failed: %w", err)
 	}
 
-	rc, err := v.m.NewSoftwareRenderContext()
-	if err != nil {
-		return fmt.Errorf("failed to create software render context: %w", err)
-	}
-	v.rc = rc
-
 	go v.eventLoop()
+	go v.renderLoop()
 
 	return nil
+}
+
+func (v *VideoWidget) onRealize() {
+	v.glArea.MakeCurrent()
+	
+	rc, err := v.m.NewRenderContext(getProcAddress, false)
+
+	if err != nil {
+		log.Printf("Failed to create GL render context: %v\n", err)
+		return
+	}
+	v.rc = rc
+}
+
+func (v *VideoWidget) onUnrealize() {
+	if v.rc != nil {
+		v.glArea.MakeCurrent()
+		v.rc.Free()
+		v.rc = nil
+	}
+}
+
+func (v *VideoWidget) onRender(context gdk.GLContexter) bool {
+	if v.rc == nil {
+		return false
+	}
+	
+	// 获取当前屏幕的缩放比例 (HiDPI)
+	scale := v.glArea.ScaleFactor()
+	fbo := mpv.OpenGLFBO{
+		FBO:            getCurrentFBO(),
+		W:              v.glArea.AllocatedWidth() * scale,
+		H:              v.glArea.AllocatedHeight() * scale,
+		InternalFormat: 0,
+	}
+
+	// flipY=true since GTK's OpenGL coordinates are generally flipped vs standard images
+	if err := v.rc.Render(fbo, true); err != nil {
+		log.Printf("MPV render error: %v\n", err)
+	}
+	v.rc.ReportSwap()
+
+	return true
 }
 
 func (v *VideoWidget) eventLoop() {
@@ -103,7 +138,6 @@ func (v *VideoWidget) eventLoop() {
 			if d, ok := duration.(float64); ok {
 				v.duration = d
 			}
-			go v.renderLoop()
 			if v.onRefresh != nil {
 				glib.IdleAdd(v.onRefresh)
 			}
@@ -122,50 +156,28 @@ func (v *VideoWidget) eventLoop() {
 }
 
 func (v *VideoWidget) renderLoop() {
-	time.Sleep(100 * time.Millisecond)
+	for {
+		if v.rc == nil {
+			time.Sleep(10 * time.Millisecond)
+			continue
+		}
 
-	for v.playing {
 		select {
 		case <-v.rc.WaitUpdate():
 			flags := v.rc.Update()
 			if flags&mpv.RENDER_UPDATE_FRAME != 0 {
-				v.mu.Lock()
-				err := v.rc.RenderSW(
-					renderWidth, renderHeight,
-					"rgba",
-					renderWidth*4,
-					unsafe.Pointer(&v.rgba[0]),
-				)
-				v.mu.Unlock()
-
-				if err == nil {
-					// Copy pixel data to avoid data races when main thread creates texture
-					frameData := make([]byte, len(v.rgba))
-					copy(frameData, v.rgba)
-
-					glib.IdleAdd(func() {
-						bytes := glib.NewBytes(frameData)
-						texture := gdk.NewMemoryTexture(
-							renderWidth, renderHeight,
-							gdk.MemoryR8G8B8A8,
-							bytes,
-							renderWidth*4,
-						)
-						v.picture.SetPaintable(texture)
-					})
-				}
-				v.rc.ReportSwap()
+				glib.IdleAdd(func() {
+					v.glArea.QueueDraw()
+				})
 			}
 		case <-time.After(100 * time.Millisecond):
 		}
 
-		if !v.playing {
-			break
-		}
-
-		pos, _ := v.m.GetProperty("time-pos", mpv.FORMAT_DOUBLE)
-		if p, ok := pos.(float64); ok {
-			v.position = p
+		if v.playing {
+			pos, _ := v.m.GetProperty("time-pos", mpv.FORMAT_DOUBLE)
+			if p, ok := pos.(float64); ok {
+				v.position = p
+			}
 		}
 	}
 }
@@ -175,16 +187,6 @@ func (v *VideoWidget) Play(source string) error {
 		return fmt.Errorf("player not initialized")
 	}
 	return v.m.Command([]string{"loadfile", source})
-}
-
-func (v *VideoWidget) PlayURL(url string, headerStr string) error {
-	if v.m == nil {
-		return fmt.Errorf("player not initialized")
-	}
-	if headerStr != "" {
-		v.m.SetOptionString("http-header-fields", headerStr)
-	}
-	return v.m.Command([]string{"loadfile", url})
 }
 
 func (v *VideoWidget) Pause() {
@@ -219,17 +221,12 @@ func (v *VideoWidget) Stop() {
 	v.duration = 0
 	v.title = ""
 	
-	// clear screen
 	glib.IdleAdd(func() {
-		v.picture.SetPaintable(nil)
+		v.glArea.QueueDraw()
 	})
 }
 
 func (v *VideoWidget) Destroy() {
-	if v.rc != nil {
-		v.rc.Free()
-		v.rc = nil
-	}
 	if v.m != nil {
 		v.m.TerminateDestroy()
 		v.m = nil
@@ -253,7 +250,7 @@ type PlayerUI struct {
 
 func NewPlayerUI(app *gtk.Application) *PlayerUI {
 	window := gtk.NewApplicationWindow(app)
-	window.SetTitle("Go-MPV Player (gotk4)")
+	window.SetTitle("Go-MPV Player (GLArea HW Render)")
 	window.SetDefaultSize(960, 600)
 
 	ui := &PlayerUI{
@@ -297,17 +294,10 @@ func (ui *PlayerUI) setupUI() {
 		dialog.Show()
 	})
 
-	openUrlBtn := gtk.NewButtonWithLabel("Open URL")
-	// TODO: Replace with a proper dialog to input URL
-	openUrlBtn.ConnectClicked(func() {
-		log.Println("Open URL clicked (Input dialog to be implemented in GTK4)")
-	})
-
 	ui.titleLbl = gtk.NewLabel("Waiting...")
 	ui.titleLbl.SetHExpand(true)
 	
 	topBar.Append(openFileBtn)
-	topBar.Append(openUrlBtn)
 	topBar.Append(ui.titleLbl)
 
 	// Bottom Control bar
@@ -325,7 +315,6 @@ func (ui *PlayerUI) setupUI() {
 	ui.progress.SetDrawValue(false)
 	ui.progress.SetHExpand(true)
 
-	// Update seek position when user changes value
 	ui.progress.ConnectValueChanged(func() {
 		if !ui.seekUpdateBlocked && ui.video.playing {
 			val := ui.progress.Value()
@@ -390,7 +379,7 @@ func (ui *PlayerUI) setupUI() {
 	// Main Layout
 	mainBox := gtk.NewBox(gtk.OrientationVertical, 0)
 	mainBox.Append(topBar)
-	mainBox.Append(ui.video.picture)
+	mainBox.Append(ui.video.glArea)
 	mainBox.Append(bottomBar)
 
 	ui.window.SetChild(mainBox)
